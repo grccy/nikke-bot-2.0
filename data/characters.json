@@ -1,0 +1,56 @@
+[
+    {
+        "name": "红莲",
+        "aliases": ["红莲·暗影", "Scarlet", "红莲暗影"],
+        "rarity": "SSR",
+        "element": "火",
+        "weapon_type": "AR",
+        "burst_level": "III",
+        "manufacturer": "pilgrim"
+    },
+    {
+        "name": "神罚",
+        "aliases": ["Modernia", "莫德妮亚"],
+        "rarity": "SSR",
+        "element": "风",
+        "weapon_type": "MG",
+        "burst_level": "III",
+        "manufacturer": "pilgrim"
+    },
+    {
+        "name": "丽塔",
+        "aliases": ["Liter"],
+        "rarity": "SSR",
+        "element": "铁甲",
+        "weapon_type": "SMG",
+        "burst_level": "I",
+        "manufacturer": "missilis"
+    },
+    {
+        "name": "爱丽丝",
+        "aliases": ["Alice"],
+        "rarity": "SSR",
+        "element": "水",
+        "weapon_type": "SR",
+        "burst_level": "III",
+        "manufacturer": "tetra"
+    },
+    {
+        "name": "小红帽",
+        "aliases": ["Red Hood", "小红"],
+        "rarity": "SSR",
+        "element": "铁甲",
+        "weapon_type": "SR",
+        "burst_level": "III",
+        "manufacturer": "pilgrim"
+    },
+    {
+        "name": "娜嘉",
+        "aliases": ["Naga"],
+        "rarity": "SSR",
+        "element": "水",
+        "weapon_type": "SMG",
+        "burst_level": "II",
+        "manufacturer": "missilis"
+    }
+]
