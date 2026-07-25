@@ -4,12 +4,13 @@ NIKKE T10 装备词条管理 QQ 机器人 v2.1
 
 启动流程：
 1. 加载环境变量
-2. 执行数据库迁移
-3. 加载静态数据（角色、装备模板）
-4. 初始化状态管理表
-5. 注册 NoneBot 适配器
-6. 加载插件
-7. 启动
+2. 初始化 DatabaseManager
+3. 执行数据库迁移
+4. 加载静态数据（角色、装备模板）
+5. 初始化状态管理表
+6. 注册 NoneBot 适配器
+7. 加载插件
+8. 启动
 """
 
 import asyncio
@@ -45,38 +46,54 @@ async def startup():
     logger = logging.getLogger("nikke_bot")
     logger.info("NIKKE 装备管理机器人 v2.1 正在启动...")
 
-    # 1. 执行数据库迁移
-    from src.database.migrations import run_migrations
-    logger.info("执行数据库迁移...")
-    await run_migrations()
+    # 1. 初始化 DatabaseManager
+    from src.database.manager import DatabaseManager
+    cfg = get_config()
+    db_manager = DatabaseManager(cfg.database.path)
+    await db_manager.startup(run_migration=True)
+    logger.info("数据库初始化完成")
 
-    # 2. 初始化状态管理表
+    # 2. 注入 DatabaseManager 给 Handler 层
+    from src.bot.plugins.equipment.handlers import set_db_manager
+    set_db_manager(db_manager)
+
+    # 3. 初始化状态管理表
     from src.state.storage import init_state_table
     await init_state_table()
 
-    # 3. 加载静态数据
+    # 4. 加载静态数据
     from src.services.data_loader import load_all
     await load_all()
 
+    # 5. 保存 db_manager 引用供 shutdown 使用
+    global _global_db_manager
+    _global_db_manager = db_manager
+
     logger.info("启动完成，等待消息...")
+
+
+_global_db_manager = None
 
 
 def main():
     """主入口"""
     nonebot.init()
 
-    # 注册驱动和适配器
     driver = nonebot.get_driver()
     driver.register_adapter(OneBotV11Adapter)
 
-    # 注册启动钩子
     @driver.on_startup
     async def _startup():
         await startup()
 
-    # 加载插件
-    nonebot.load_plugins("src/bot/plugins")
+    @driver.on_shutdown
+    async def _shutdown():
+        global _global_db_manager
+        if _global_db_manager:
+            await _global_db_manager.shutdown()
+            logging.getLogger("nikke_bot").info("数据库连接已关闭")
 
+    nonebot.load_plugins("src/bot/plugins")
     nonebot.run()
 
 

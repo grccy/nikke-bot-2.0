@@ -1,98 +1,94 @@
 """
 数据库迁移管理器
 
-统一使用增量迁移策略：
-- 首次启动：从版本 0 执行到最新版本
-- 后续启动：执行未应用的迁移
-- 每个迁移在独立事务中运行
+从 database/schema/ 目录自动加载 .sql 文件作为迁移脚本。
+文件名约定: vNNN_description.sql（NNN = 三位数版本号，如 v001_initial.sql）。
+
+特性：
+- 首次启动：扫描全部 SQL 文件，按版本号排序执行
+- 后续启动：只执行 version > current_version 的迁移
+- 每个迁移在独立事务中运行，失败回滚
 - 已应用的迁移不可修改
 
-新增迁移步骤：
-1. 在下方创建 @register 装饰的异步函数
-2. 版本号递增
+新增迁移：
+1. 在 database/schema/ 目录下新建 vNNN_description.sql 文件
+2. 文件头部注释格式: -- vNNN: 简短标题
+                                     -- Description: 详细描述
 3. 重启机器人自动执行
 """
 
 import logging
+import re
 from pathlib import Path
-from typing import Callable, Awaitable
-import aiosqlite
+from typing import List, NamedTuple
 
-from src.database.connection import create_connection
+import aiosqlite
 
 logger = logging.getLogger(__name__)
 
-# 迁移定义：(版本号, 描述, 迁移函数)
-Migration = tuple[int, str, Callable[[aiosqlite.Connection], Awaitable[None]]]
+# SQL 文件命名规范: v001_initial.sql
+_FILENAME_PATTERN = re.compile(r"^v(\d{3})_(.+)\.sql$")
 
-# 迁移注册表（按版本号排序）
-_migrations: list[Migration] = []
-
-
-def register(version: int, description: str):
-    """装饰器：注册迁移函数"""
-
-    def decorator(func: Callable[[aiosqlite.Connection], Awaitable[None]]):
-        _migrations.append((version, description, func))
-        _migrations.sort(key=lambda m: m[0])
-        return func
-
-    return decorator
+# 从 SQL 注释提取描述
+_DESC_PATTERN = re.compile(r"--\s*Description:\s*(.+)")
 
 
-# ============================================================
-# 迁移 v1：初始建表
-# ============================================================
+class MigrationFile(NamedTuple):
+    """迁移文件描述"""
+    version: int
+    name: str
+    description: str
+    path: Path
 
-@register(version=1, description="创建初始表结构（7 张核心表 + 全部索引）")
-async def migration_001_initial_schema(db: aiosqlite.Connection):
-    """创建全部核心表及索引"""
-    schema_path = Path(__file__).parent / "schema.sql"
-    schema_sql = schema_path.read_text(encoding="utf-8")
-    await db.executescript(schema_sql)
-
-
-# ============================================================
-# 后续迁移模板（按需取消注释并实现）
-# ============================================================
-
-# @register(version=2, description="优化索引：删除低效单列，新增复合索引")
-# async def migration_002_optimize_indexes(db: aiosqlite.Connection):
-#     await db.execute("DROP INDEX IF EXISTS idx_equipments_slot")
-#     await db.execute("DROP INDEX IF EXISTS idx_equipments_manufacturer")
-#     await db.execute(
-#         "CREATE INDEX IF NOT EXISTS idx_equipments_filter "
-#         "ON equipments(manufacturer, type, slot)"
-#     )
-
-# @register(version=3, description="强化约束：添加 CHECK 和 UNIQUE 约束")
-# async def migration_003_strengthen_constraints(db: aiosqlite.Connection):
-#     # 注意：此迁移已在 v1 schema.sql 中包含，仅用于从旧版本升级的场景
-#     pass
-
-# @register(version=4, description="OCR 外键修复：user_id 改为 SET NULL")
-# async def migration_004_fix_ocr_fk(db: aiosqlite.Connection):
-#     # 重建 ocr_records 表以修改外键策略
-#     pass
-
-# @register(version=5, description="新增 is_locked 字段")
-# async def migration_005_add_is_locked(db: aiosqlite.Connection):
-#     await db.execute(
-#         "ALTER TABLE equipments ADD COLUMN is_locked INTEGER NOT NULL DEFAULT 0 "
-#         "CHECK (is_locked IN (0, 1))"
-#     )
-#     await db.execute(
-#         "CREATE INDEX IF NOT EXISTS idx_equipments_is_locked ON equipments(is_locked)"
-#     )
-
-# @register(version=6, description="创建 operation_logs 表")
-# async def migration_006_create_operation_logs(db: aiosqlite.Connection):
-#     pass
+    @property
+    def sql(self) -> str:
+        return self.path.read_text(encoding="utf-8")
 
 
-# ============================================================
-# 迁移管理器
-# ============================================================
+def _discover_migrations(schema_dir: Path) -> List[MigrationFile]:
+    """扫描 schema/ 目录，发现并返回排序后的迁移文件列表。
+
+    Args:
+        schema_dir: schema SQL 文件所在目录
+
+    Returns:
+        按 version 排序的 MigrationFile 列表
+    """
+    if not schema_dir.exists():
+        logger.warning(f"schema 目录不存在: {schema_dir}")
+        return []
+
+    migrations: List[MigrationFile] = []
+
+    for filepath in sorted(schema_dir.glob("v*.sql")):
+        match = _FILENAME_PATTERN.match(filepath.name)
+        if not match:
+            logger.warning(f"跳过不符合命名规范的 SQL 文件: {filepath.name}")
+            continue
+
+        version_str, name = match.groups()
+        version = int(version_str)
+
+        # 从 SQL 文件头部提取 Description
+        description = name.replace("_", " ")
+        try:
+            first_lines = filepath.read_text(encoding="utf-8")[:500]
+            desc_match = _DESC_PATTERN.search(first_lines)
+            if desc_match:
+                description = desc_match.group(1).strip()
+        except Exception:
+            pass
+
+        migrations.append(MigrationFile(
+            version=version,
+            name=name,
+            description=description,
+            path=filepath,
+        ))
+
+    migrations.sort(key=lambda m: m.version)
+    return migrations
+
 
 async def _ensure_schema_version_table(db: aiosqlite.Connection):
     """确保 schema_version 表存在"""
@@ -111,48 +107,66 @@ async def _get_current_version(db: aiosqlite.Connection) -> int:
     return row[0] if row and row[0] is not None else 0
 
 
-async def run_migrations():
+async def _apply_migration(db: aiosqlite.Connection, migration: MigrationFile):
+    """应用单个迁移文件。
+
+    Args:
+        db: 数据库连接
+        migration: 迁移文件
     """
-    执行所有未应用的数据库迁移。
+    sql = migration.sql
+    logger.info(f"  执行 SQL ({len(sql)} bytes)...")
+    await db.executescript(sql)
+    await db.execute(
+        "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+        (migration.version, _utc_now()),
+    )
 
-    策略：
-    - 首次启动：current_version=0，执行所有迁移
-    - 后续启动：执行 version > current_version 的迁移
-    - 每个迁移在独立事务中运行，失败回滚
+
+async def run_migrations(db: aiosqlite.Connection):
+    """执行所有未应用的数据库迁移。
+
+    Args:
+        db: 数据库连接（已由 DatabaseManager 创建和配置）
     """
-    db = await create_connection()
+    schema_dir = Path(__file__).parent / "schema"
+    discovered = _discover_migrations(schema_dir)
 
-    try:
-        await _ensure_schema_version_table(db)
-        current_version = await _get_current_version(db)
+    if not discovered:
+        logger.warning("未发现任何迁移 SQL 文件")
+        return
 
-        logger.info(f"当前数据库版本: {current_version}")
+    await _ensure_schema_version_table(db)
+    current_version = await _get_current_version(db)
 
-        for version, description, migrate_func in _migrations:
-            if version > current_version:
-                logger.info(f"正在应用迁移 v{version}: {description}")
+    logger.info(f"当前数据库版本: {current_version}, "
+                f"可用迁移: {[m.version for m in discovered]}")
 
-                try:
-                    await db.execute("BEGIN")
-                    await migrate_func(db)
-                    await db.execute(
-                        "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
-                        (version, _utc_now()),
-                    )
-                    await db.execute("COMMIT")
-                    logger.info(f"  迁移 v{version} 完成: {description}")
+    applied = 0
+    for migration in discovered:
+        if migration.version > current_version:
+            logger.info(f"正在应用迁移 v{migration.version:03d}: {migration.description}")
 
-                except Exception:
-                    await db.execute("ROLLBACK")
-                    logger.error(
-                        f"  迁移 v{version} 失败: {description}", exc_info=True
-                    )
-                    raise
+            try:
+                await db.execute("BEGIN")
+                await _apply_migration(db, migration)
+                await db.execute("COMMIT")
+                logger.info(f"  ✓ 迁移 v{migration.version:03d} 完成")
+                applied += 1
 
-        logger.info(f"数据库迁移完成，当前版本: {await _get_current_version(db)}")
+            except Exception:
+                await db.execute("ROLLBACK")
+                logger.error(
+                    f"  ✗ 迁移 v{migration.version:03d} 失败: {migration.description}",
+                    exc_info=True,
+                )
+                raise
 
-    finally:
-        await db.close()
+    if applied > 0:
+        logger.info(f"数据库迁移完成: {applied} 个已应用, "
+                    f"当前版本: {await _get_current_version(db)}")
+    else:
+        logger.info("数据库已是最新版本，无需迁移")
 
 
 def _utc_now() -> str:

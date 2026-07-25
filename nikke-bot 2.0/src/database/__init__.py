@@ -2,15 +2,21 @@
 数据库层
 
 提供：
-- connection: 数据库连接管理
-- migrations: 增量迁移系统
-- repositories: 数据访问层（待 Phase 2 实现）
+- DatabaseManager: 连接生命周期管理
+- create_connection: 底层连接工厂（测试用）
+- run_migrations: 迁移管理器
+
+Repository 构造规范：
+    所有 Repository 通过 constructor injection 接收 aiosqlite.Connection。
+    连接由 DatabaseManager 在 startup 时创建，shutdown 时关闭。
 """
 
 from src.database.connection import create_connection, check_connection
+from src.database.manager import DatabaseManager
 from src.database.migrations import run_migrations
 
 __all__ = [
+    "DatabaseManager",
     "create_connection",
     "check_connection",
     "run_migrations",

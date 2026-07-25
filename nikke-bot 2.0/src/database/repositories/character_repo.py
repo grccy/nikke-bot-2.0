@@ -14,17 +14,10 @@ from src.utils.json_utils import safe_json_dumps, safe_json_loads
 
 
 class CharacterRepository(BaseRepository):
-    """角色数据访问层"""
+    """角色数据访问层。"""
 
     async def insert(self, character: Character) -> Character:
-        """插入新角色。
-
-        Args:
-            character: 角色模型（id 会被忽略，由数据库分配）
-
-        Returns:
-            包含数据库 ID 的角色
-        """
+        """插入新角色。"""
         aliases_json = safe_json_dumps(character.aliases)
         mfr_value = character.manufacturer.value if character.manufacturer else None
 
@@ -48,15 +41,11 @@ class CharacterRepository(BaseRepository):
         return character
 
     async def upsert(self, character: Character) -> Character:
-        """创建或更新角色（按 name 去重）。
-
-        如果角色已存在，更新除 name 外的所有字段。
-        如果角色不存在，插入新记录。
-        """
+        """创建或更新角色（按 name 去重）。"""
         aliases_json = safe_json_dumps(character.aliases)
         mfr_value = character.manufacturer.value if character.manufacturer else None
 
-        cursor = await self.db.execute(
+        await self.db.execute(
             """
             INSERT INTO characters (name, aliases, rarity, element, weapon_type, burst_level, manufacturer)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -69,18 +58,12 @@ class CharacterRepository(BaseRepository):
                 manufacturer = excluded.manufacturer
             """,
             (
-                character.name,
-                aliases_json,
-                character.rarity,
-                character.element,
-                character.weapon_type,
-                character.burst_level,
-                mfr_value,
+                character.name, aliases_json, character.rarity,
+                character.element, character.weapon_type, character.burst_level, mfr_value,
             ),
         )
         await self.db.commit()
 
-        # 获取实际 ID
         row = await self.db.execute(
             "SELECT id FROM characters WHERE name = ?", (character.name,)
         )
@@ -90,76 +73,41 @@ class CharacterRepository(BaseRepository):
         return character
 
     async def get_by_id(self, char_id: int) -> Optional[Character]:
-        """根据 ID 查询角色。
-
-        Args:
-            char_id: 角色 ID
-
-        Returns:
-            Character 或 None
-        """
+        """根据 ID 查询角色。"""
         cursor = await self.db.execute(
             "SELECT id, name, aliases, rarity, element, weapon_type, burst_level, manufacturer "
             "FROM characters WHERE id = ?",
             (char_id,),
         )
         row = await cursor.fetchone()
-        if row is None:
-            return None
-        return self._row_to_character(row)
+        return self._row_to_character(row) if row else None
 
     async def get_by_name(self, name: str) -> Optional[Character]:
-        """根据规范名称查询角色。
-
-        Args:
-            name: 角色规范名称，如 "红莲"
-
-        Returns:
-            Character 或 None
-        """
+        """根据规范名称查询角色。"""
         cursor = await self.db.execute(
             "SELECT id, name, aliases, rarity, element, weapon_type, burst_level, manufacturer "
             "FROM characters WHERE name = ?",
             (name,),
         )
         row = await cursor.fetchone()
-        if row is None:
-            return None
-        return self._row_to_character(row)
+        return self._row_to_character(row) if row else None
 
     async def search_by_alias(self, keyword: str) -> Optional[Character]:
-        """通过别名搜索角色。
-
-        先精确匹配 name，再在 aliases JSON 中模糊搜索。
-
-        Args:
-            keyword: 搜索关键词，如 "Scarlet" 或 "红莲"
-
-        Returns:
-            匹配的 Character 或 None
-        """
-        # 第 1 步：精确匹配 name
+        """通过别名搜索角色（先精确 name，再 LIKE aliases）。"""
         result = await self.get_by_name(keyword)
         if result:
             return result
 
-        # 第 2 步：在 aliases JSON 中 LIKE 搜索
         cursor = await self.db.execute(
             "SELECT id, name, aliases, rarity, element, weapon_type, burst_level, manufacturer "
             "FROM characters WHERE aliases LIKE ? LIMIT 1",
             (f"%{keyword}%",),
         )
         row = await cursor.fetchone()
-        if row is None:
-            return None
-        return self._row_to_character(row)
+        return self._row_to_character(row) if row else None
 
     async def get_all(self) -> list[Character]:
-        """获取所有角色。
-
-        Returns:
-            角色列表
-        """
+        """获取所有角色。"""
         cursor = await self.db.execute(
             "SELECT id, name, aliases, rarity, element, weapon_type, burst_level, manufacturer "
             "FROM characters ORDER BY name"
@@ -168,21 +116,12 @@ class CharacterRepository(BaseRepository):
         return [self._row_to_character(r) for r in rows]
 
     async def delete(self, char_id: int) -> bool:
-        """删除角色（引用该角色的装备 character_id 会被置空）。
-
-        Args:
-            char_id: 角色 ID
-
-        Returns:
-            是否删除成功
-        """
+        """删除角色（引用该角色的装备 character_id 置空）。"""
         cursor = await self.db.execute(
             "DELETE FROM characters WHERE id = ?", (char_id,)
         )
         await self.db.commit()
         return cursor.rowcount > 0
-
-    # ---- 内部方法 ----
 
     def _row_to_character(self, row: aiosqlite.Row) -> Character:
         """将数据库行转换为 Character 模型"""

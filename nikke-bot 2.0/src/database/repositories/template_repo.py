@@ -14,18 +14,11 @@ from src.models.enums import EquipmentType, EquipmentSlot, Manufacturer
 
 
 class TemplateRepository(BaseRepository):
-    """装备模板数据访问层"""
+    """装备模板数据访问层。"""
 
     async def upsert(self, template: EquipmentTemplate) -> EquipmentTemplate:
-        """创建或更新装备模板（按 manufacturer+type+slot 去重）。
-
-        Args:
-            template: 模板模型
-
-        Returns:
-            包含数据库 ID 的模板
-        """
-        cursor = await self.db.execute(
+        """创建或更新装备模板（按 manufacturer+type+slot 去重）。"""
+        await self.db.execute(
             """
             INSERT INTO equipment_templates (name, type, slot, manufacturer, rarity, icon_name)
             VALUES (?, ?, ?, ?, ?, ?)
@@ -45,9 +38,9 @@ class TemplateRepository(BaseRepository):
         )
         await self.db.commit()
 
-        # 获取实际 ID
         row = await self.db.execute(
-            "SELECT id FROM equipment_templates WHERE manufacturer = ? AND type = ? AND slot = ?",
+            "SELECT id FROM equipment_templates "
+            "WHERE manufacturer = ? AND type = ? AND slot = ?",
             (template.manufacturer.value, template.type.value, template.slot.value),
         )
         result = await row.fetchone()
@@ -56,53 +49,29 @@ class TemplateRepository(BaseRepository):
         return template
 
     async def get_by_id(self, template_id: int) -> Optional[EquipmentTemplate]:
-        """根据 ID 查询模板。
-
-        Args:
-            template_id: 模板 ID
-
-        Returns:
-            EquipmentTemplate 或 None
-        """
+        """根据 ID 查询模板。"""
         cursor = await self.db.execute(
             "SELECT id, name, type, slot, manufacturer, rarity, icon_name "
             "FROM equipment_templates WHERE id = ?",
             (template_id,),
         )
         row = await cursor.fetchone()
-        if row is None:
-            return None
-        return self._row_to_template(row)
+        return self._row_to_template(row) if row else None
 
     async def get_by_key(
         self, manufacturer: Manufacturer, type_: EquipmentType, slot: EquipmentSlot
     ) -> Optional[EquipmentTemplate]:
-        """根据三元组查询模板。
-
-        Args:
-            manufacturer: 制造商
-            type_: 装备类型
-            slot: 装备部位
-
-        Returns:
-            EquipmentTemplate 或 None
-        """
+        """根据三元组查询模板。"""
         cursor = await self.db.execute(
             "SELECT id, name, type, slot, manufacturer, rarity, icon_name "
             "FROM equipment_templates WHERE manufacturer = ? AND type = ? AND slot = ?",
             (manufacturer.value, type_.value, slot.value),
         )
         row = await cursor.fetchone()
-        if row is None:
-            return None
-        return self._row_to_template(row)
+        return self._row_to_template(row) if row else None
 
     async def get_all(self) -> list[EquipmentTemplate]:
-        """获取所有模板（全量加载，适合内存缓存）。
-
-        Returns:
-            模板列表
-        """
+        """获取所有模板（全量加载，适合内存缓存）。"""
         cursor = await self.db.execute(
             "SELECT id, name, type, slot, manufacturer, rarity, icon_name "
             "FROM equipment_templates ORDER BY manufacturer, type, slot"
@@ -111,16 +80,10 @@ class TemplateRepository(BaseRepository):
         return [self._row_to_template(r) for r in rows]
 
     async def count(self) -> int:
-        """统计模板总数。
-
-        Returns:
-            模板数量
-        """
+        """统计模板总数。"""
         cursor = await self.db.execute("SELECT COUNT(*) FROM equipment_templates")
         row = await cursor.fetchone()
         return row[0] if row else 0
-
-    # ---- 内部方法 ----
 
     def _row_to_template(self, row: aiosqlite.Row) -> EquipmentTemplate:
         """将数据库行转换为 EquipmentTemplate 模型"""

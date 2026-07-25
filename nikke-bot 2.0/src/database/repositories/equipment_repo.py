@@ -15,30 +15,16 @@ from src.models.enums import (
     EquipmentType,
     EquipmentSlot,
     Manufacturer,
-    AffixQuality,
     ScopeType,
 )
 from src.utils.time_utils import utc_now
 
 
 class EquipmentRepository(BaseRepository):
-    """装备实例数据访问层"""
-
-    # ================================================================
-    # 写入操作
-    # ================================================================
+    """装备实例数据访问层。"""
 
     async def insert(self, equipment: Equipment) -> Equipment:
-        """插入新装备（不包含词条，词条由 AffixRepository 单独写入）。
-
-        使用事务：先插入装备，再插入词条。
-
-        Args:
-            equipment: 装备模型（id 会被忽略）
-
-        Returns:
-            包含数据库 ID 和时间戳的装备
-        """
+        """插入新装备（不含词条）。"""
         now = utc_now()
 
         cursor = await self.db.execute(
@@ -76,14 +62,7 @@ class EquipmentRepository(BaseRepository):
         return equipment
 
     async def update(self, equipment: Equipment) -> Equipment:
-        """更新装备基本信息（不含词条）。
-
-        Args:
-            equipment: 装备模型（id 必须存在）
-
-        Returns:
-            更新后的装备
-        """
+        """更新装备基本信息（不含词条）。"""
         if equipment.id is None:
             raise ValueError("更新装备时必须提供 id")
 
@@ -92,18 +71,9 @@ class EquipmentRepository(BaseRepository):
         await self.db.execute(
             """
             UPDATE equipments SET
-                character_id = ?,
-                name = ?,
-                type = ?,
-                slot = ?,
-                manufacturer = ?,
-                level = ?,
-                scope = ?,
-                group_id = ?,
-                is_locked = ?,
-                score = ?,
-                is_bis = ?,
-                updated_at = ?
+                character_id = ?, name = ?, type = ?, slot = ?, manufacturer = ?,
+                level = ?, scope = ?, group_id = ?,
+                is_locked = ?, score = ?, is_bis = ?, updated_at = ?
             WHERE id = ?
             """,
             (
@@ -123,49 +93,25 @@ class EquipmentRepository(BaseRepository):
             ),
         )
         await self.db.commit()
-
         equipment.updated_at = now  # type: ignore
         return equipment
 
     async def delete(self, equipment_id: int) -> bool:
-        """删除装备（级联删除词条）。
-
-        Args:
-            equipment_id: 装备 ID
-
-        Returns:
-            是否删除成功
-        """
+        """删除装备（级联删除词条）。"""
         cursor = await self.db.execute(
             "DELETE FROM equipments WHERE id = ?", (equipment_id,)
         )
         await self.db.commit()
         return cursor.rowcount > 0
 
-    # ================================================================
-    # 读取操作
-    # ================================================================
-
     async def get_by_id(self, equipment_id: int) -> Optional[Equipment]:
-        """根据 ID 查询装备（不含词条）。
-
-        Args:
-            equipment_id: 装备 ID
-
-        Returns:
-            Equipment 或 None
-        """
+        """根据 ID 查询装备（不含词条）。"""
         cursor = await self.db.execute(
-            """SELECT id, owner_id, template_id, character_id, name, type, slot,
-                      manufacturer, level, screenshot_path, scope, group_id,
-                      is_locked, score, is_bis, created_at, updated_at
-               FROM equipments WHERE id = ?""",
+            _SELECT_EQUIPMENT + " WHERE id = ?",
             (equipment_id,),
         )
         row = await cursor.fetchone()
-        if row is None:
-            return None
-        return self._row_to_equipment(row)
+        return self._row_to_equipment(row) if row else None
 
     async def get_by_owner(
         self,
@@ -177,20 +123,7 @@ class EquipmentRepository(BaseRepository):
         limit: int = 50,
         offset: int = 0,
     ) -> list[Equipment]:
-        """查询用户装备，支持多条件筛选。
-
-        Args:
-            owner_id: 用户 QQ 号
-            character_id: 角色 ID 筛选（可选）
-            type_: 装备类型筛选（可选）
-            slot: 装备部位筛选（可选）
-            manufacturer: 制造商筛选（可选）
-            limit: 每页数量
-            offset: 偏移量
-
-        Returns:
-            装备列表（不含词条）
-        """
+        """查询用户装备，支持多条件筛选。"""
         conditions = ["owner_id = ?"]
         params: list = [owner_id]
 
@@ -209,10 +142,7 @@ class EquipmentRepository(BaseRepository):
 
         where = " AND ".join(conditions)
         query = (
-            f"SELECT id, owner_id, template_id, character_id, name, type, slot, "
-            f"manufacturer, level, screenshot_path, scope, group_id, "
-            f"is_locked, score, is_bis, created_at, updated_at "
-            f"FROM equipments WHERE {where} "
+            f"{_SELECT_EQUIPMENT} WHERE {where} "
             f"ORDER BY created_at DESC LIMIT ? OFFSET ?"
         )
         params.extend([limit, offset])
@@ -227,16 +157,7 @@ class EquipmentRepository(BaseRepository):
         character_id: Optional[int] = None,
         type_: Optional[EquipmentType] = None,
     ) -> int:
-        """统计用户装备数量。
-
-        Args:
-            owner_id: 用户 QQ 号
-            character_id: 角色 ID 筛选（可选）
-            type_: 装备类型筛选（可选）
-
-        Returns:
-            装备数量
-        """
+        """统计用户装备数量。"""
         conditions = ["owner_id = ?"]
         params: list = [owner_id]
         if character_id is not None:
@@ -256,43 +177,12 @@ class EquipmentRepository(BaseRepository):
     async def search_by_affix_name(
         self, affix_name: str, owner_id: Optional[str] = None, limit: int = 20
     ) -> list[Equipment]:
-        """查询包含指定词条名称的装备。
-
-        通过 JOIN affixes 表查询，按词条数值降序。
-
-        Args:
-            affix_name: 词条规范名称
-            owner_id: 用户 QQ 号（可选，不传则查全部）
-            limit: 返回数量
-
-        Returns:
-            装备列表（不含词条）
-        """
+        """查询包含指定词条名称的装备（JOIN affixes 表）。"""
         if owner_id:
-            query = """
-                SELECT DISTINCT e.id, e.owner_id, e.template_id, e.character_id,
-                       e.name, e.type, e.slot, e.manufacturer, e.level,
-                       e.screenshot_path, e.scope, e.group_id,
-                       e.is_locked, e.score, e.is_bis, e.created_at, e.updated_at
-                FROM equipments e
-                INNER JOIN affixes a ON a.equipment_id = e.id
-                WHERE a.name = ? AND e.owner_id = ?
-                ORDER BY a.value DESC
-                LIMIT ?
-            """
+            query = _SELECT_EQUIPMENT_JOIN_AFFIX + " WHERE a.name = ? AND e.owner_id = ? ORDER BY a.value DESC LIMIT ?"
             params = [affix_name, owner_id, limit]
         else:
-            query = """
-                SELECT DISTINCT e.id, e.owner_id, e.template_id, e.character_id,
-                       e.name, e.type, e.slot, e.manufacturer, e.level,
-                       e.screenshot_path, e.scope, e.group_id,
-                       e.is_locked, e.score, e.is_bis, e.created_at, e.updated_at
-                FROM equipments e
-                INNER JOIN affixes a ON a.equipment_id = e.id
-                WHERE a.name = ?
-                ORDER BY a.value DESC
-                LIMIT ?
-            """
+            query = _SELECT_EQUIPMENT_JOIN_AFFIX + " WHERE a.name = ? ORDER BY a.value DESC LIMIT ?"
             params = [affix_name, limit]
 
         cursor = await self.db.execute(query, params)
@@ -302,41 +192,12 @@ class EquipmentRepository(BaseRepository):
     async def search_by_affix_tier(
         self, min_tier: int, owner_id: Optional[str] = None, limit: int = 20
     ) -> list[Equipment]:
-        """查询词条阶级 >= min_tier 的装备。
-
-        Args:
-            min_tier: 最低阶级
-            owner_id: 用户 QQ 号（可选）
-            limit: 返回数量
-
-        Returns:
-            装备列表（不含词条）
-        """
+        """查询词条阶级 >= min_tier 的装备。"""
         if owner_id:
-            query = """
-                SELECT DISTINCT e.id, e.owner_id, e.template_id, e.character_id,
-                       e.name, e.type, e.slot, e.manufacturer, e.level,
-                       e.screenshot_path, e.scope, e.group_id,
-                       e.is_locked, e.score, e.is_bis, e.created_at, e.updated_at
-                FROM equipments e
-                INNER JOIN affixes a ON a.equipment_id = e.id
-                WHERE a.tier >= ? AND e.owner_id = ?
-                ORDER BY a.tier DESC
-                LIMIT ?
-            """
+            query = _SELECT_EQUIPMENT_JOIN_AFFIX + " WHERE a.tier >= ? AND e.owner_id = ? ORDER BY a.tier DESC LIMIT ?"
             params = [min_tier, owner_id, limit]
         else:
-            query = """
-                SELECT DISTINCT e.id, e.owner_id, e.template_id, e.character_id,
-                       e.name, e.type, e.slot, e.manufacturer, e.level,
-                       e.screenshot_path, e.scope, e.group_id,
-                       e.is_locked, e.score, e.is_bis, e.created_at, e.updated_at
-                FROM equipments e
-                INNER JOIN affixes a ON a.equipment_id = e.id
-                WHERE a.tier >= ?
-                ORDER BY a.tier DESC
-                LIMIT ?
-            """
+            query = _SELECT_EQUIPMENT_JOIN_AFFIX + " WHERE a.tier >= ? ORDER BY a.tier DESC LIMIT ?"
             params = [min_tier, limit]
 
         cursor = await self.db.execute(query, params)
@@ -344,22 +205,9 @@ class EquipmentRepository(BaseRepository):
         return [self._row_to_equipment(r) for r in rows]
 
     async def get_top_by_score(self, limit: int = 10) -> list[Equipment]:
-        """查询评分最高的装备。
-
-        Args:
-            limit: 返回数量
-
-        Returns:
-            装备列表（不含词条）
-        """
+        """查询评分最高的装备。"""
         cursor = await self.db.execute(
-            """SELECT id, owner_id, template_id, character_id, name, type, slot,
-                      manufacturer, level, screenshot_path, scope, group_id,
-                      is_locked, score, is_bis, created_at, updated_at
-               FROM equipments
-               WHERE score IS NOT NULL
-               ORDER BY score DESC
-               LIMIT ?""",
+            _SELECT_EQUIPMENT + " WHERE score IS NOT NULL ORDER BY score DESC LIMIT ?",
             (limit,),
         )
         rows = await cursor.fetchall()
@@ -368,30 +216,14 @@ class EquipmentRepository(BaseRepository):
     async def get_group_shared(
         self, group_id: str, limit: int = 50, offset: int = 0
     ) -> list[Equipment]:
-        """查询群共享装备。
-
-        Args:
-            group_id: 群号
-            limit: 每页数量
-            offset: 偏移量
-
-        Returns:
-            装备列表（不含词条）
-        """
+        """查询群共享装备。"""
         cursor = await self.db.execute(
-            """SELECT id, owner_id, template_id, character_id, name, type, slot,
-                      manufacturer, level, screenshot_path, scope, group_id,
-                      is_locked, score, is_bis, created_at, updated_at
-               FROM equipments
-               WHERE scope = 'group' AND group_id = ?
-               ORDER BY created_at DESC
-               LIMIT ? OFFSET ?""",
+            _SELECT_EQUIPMENT
+            + " WHERE scope = 'group' AND group_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
             (group_id, limit, offset),
         )
         rows = await cursor.fetchall()
         return [self._row_to_equipment(r) for r in rows]
-
-    # ---- 内部方法 ----
 
     def _row_to_equipment(self, row: aiosqlite.Row) -> Equipment:
         """将数据库行转换为 Equipment 模型"""
@@ -413,6 +245,21 @@ class EquipmentRepository(BaseRepository):
             is_bis=bool(row["is_bis"]) if row["is_bis"] is not None else None,
             created_at=row["created_at"],
             updated_at=row["updated_at"],
-            # affixes 需要单独查询后填充
             affixes=[],
         )
+
+
+# 复用 SQL 片段
+_SELECT_EQUIPMENT = (
+    "SELECT id, owner_id, template_id, character_id, name, type, slot, "
+    "manufacturer, level, screenshot_path, scope, group_id, "
+    "is_locked, score, is_bis, created_at, updated_at FROM equipments"
+)
+
+_SELECT_EQUIPMENT_JOIN_AFFIX = (
+    "SELECT DISTINCT e.id, e.owner_id, e.template_id, e.character_id, "
+    "e.name, e.type, e.slot, e.manufacturer, e.level, "
+    "e.screenshot_path, e.scope, e.group_id, "
+    "e.is_locked, e.score, e.is_bis, e.created_at, e.updated_at "
+    "FROM equipments e INNER JOIN affixes a ON a.equipment_id = e.id"
+)

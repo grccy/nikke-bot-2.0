@@ -1,3 +1,9 @@
+"""装备管理插件 — NoneBot Handler
+
+所有 Handler 通过工厂函数获取 Service 实例，
+Repository 依赖由 DatabaseManager 统一注入。
+"""
+
 import os
 import aiohttp
 import logging
@@ -18,39 +24,75 @@ from src.state.types import SessionStateType
 from src.database.repositories.user_repo import UserRepository
 from src.database.repositories.character_repo import CharacterRepository
 from src.database.repositories.template_repo import TemplateRepository
+from src.database.repositories.equipment_repo import EquipmentRepository
+from src.database.repositories.affix_repo import AffixRepository
+from src.database.repositories.ocr_record_repo import OCRRecordRepository
 from src.models.enums import Manufacturer, EquipmentType, EquipmentSlot
+from src.models.dto.create_equipment import CreateEquipmentDTO
+from src.models.dto.create_affix import CreateAffixDTO
 from src.config import get_config
 
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# 服务单例
-# ============================================================
-equip_service = EquipmentService()
-ocr_service = OCRService()
-parser_service = ParserService()
-state_mgr = StateManager()
-
 SCREENSHOTS_DIR = get_config().screenshots_dir
 
+# ============================================================
+# 服务工厂函数 — 每次请求时从 DatabaseManager 获取连接，创建 Service
+# ============================================================
+
+from src.database import DatabaseManager
+
+_db_manager: "DatabaseManager | None" = None
+
+
+def set_db_manager(mgr: "DatabaseManager"):
+    """由 bot.py 在启动时调用，注入全局 DatabaseManager。"""
+    global _db_manager
+    _db_manager = mgr
+
+
+def _get_db():
+    if _db_manager is None:
+        raise RuntimeError("DatabaseManager 未初始化")
+    return _db_manager.connection
+
+
+def _make_equip_service() -> EquipmentService:
+    db = _get_db()
+    return EquipmentService(
+        equip_repo=EquipmentRepository(db),
+        affix_repo=AffixRepository(db),
+        template_repo=TemplateRepository(db),
+    )
+
+
+def _make_ocr_service() -> OCRService:
+    return OCRService(record_repo=OCRRecordRepository(_get_db()))
+
+
+def _make_parser_service() -> ParserService:
+    return ParserService()
+
+
+state_mgr = StateManager()
+
 
 # ============================================================
-# 命令注册
+# 辅助
 # ============================================================
 
 async def _ensure_user_registered(user_id: str, nickname: str = ""):
     """确保用户已注册（不存在则创建）"""
     from src.models.user import User
-    async with UserRepository() as repo:
-        exists = await repo.exists(user_id)
-        if not exists:
-            user = User(qq_id=user_id, nickname=nickname)
-            await repo.upsert(user)
-            logger.info(f"新用户注册: {user_id}")
-        else:
-            # 更新昵称
-            user = User(qq_id=user_id, nickname=nickname)
-            await repo.upsert(user)
+    repo = UserRepository(_get_db())
+    exists = await repo.exists(user_id)
+    if not exists:
+        user = User(qq_id=user_id, nickname=nickname)
+        await repo.upsert(user)
+        logger.info(f"新用户注册: {user_id}")
+    else:
+        user = User(qq_id=user_id, nickname=nickname)
+        await repo.upsert(user)
 
 
 # ============================================================
@@ -67,7 +109,7 @@ async def handle_record(bot: Bot, event: MessageEvent, args: Message = CommandAr
 
     await _ensure_user_registered(user_id, event.sender.nickname or "")
 
-    # 检查消息是否包含图片
+    # 检查图片
     img_urls = []
     for seg in event.message:
         if seg.type == "image":
@@ -94,15 +136,21 @@ async def handle_record(bot: Bot, event: MessageEvent, args: Message = CommandAr
 
     # OCR 识别
     await record_cmd.send("🔍 正在识别装备信息...")
-    ocr_result, ocr_record = await ocr_service.recognize(str(img_path), user_id)
+    ocr_svc = _make_ocr_service()
+    ocr_result, ocr_record = await ocr_svc.recognize(str(img_path), user_id)
 
     if not ocr_result.is_success:
-        await record_cmd.finish(f"❌ OCR 识别失败：{ocr_result.error or '未检测到文字'}\n请重发清晰截图。")
+        await record_cmd.finish(
+            f"❌ OCR 识别失败：{ocr_result.error or '未检测到文字'}\n请重发清晰截图。"
+        )
 
     # 解析文本
-    parsed = await parser_service.parse(ocr_result.raw_text)
-    logger.info(f"解析结果: mfr={parsed.get('manufacturer')}, type={parsed.get('type')}, "
-                f"slot={parsed.get('slot')}, affixes={len(parsed.get('affixes', []))}")
+    parser_svc = _make_parser_service()
+    parsed = await parser_svc.parse(ocr_result.raw_text)
+    logger.info(
+        f"解析结果: mfr={parsed.get('manufacturer')}, type={parsed.get('type')}, "
+        f"slot={parsed.get('slot')}, affixes={len(parsed.get('affixes', []))}"
+    )
 
     if len(parsed.get("affixes", [])) < 1:
         await record_cmd.finish(
@@ -110,10 +158,8 @@ async def handle_record(bot: Bot, event: MessageEvent, args: Message = CommandAr
             f"请确认截图包含 T10 装备词条界面。"
         )
 
-    # 格式化确认消息
     confirm_msg = _format_parsed_result(parsed, ocr_result.engine)
 
-    # 设置等待确认状态
     await state_mgr.set_confirm_state(
         user_id=user_id,
         payload={
@@ -132,7 +178,6 @@ async def handle_record(bot: Bot, event: MessageEvent, args: Message = CommandAr
 # ============================================================
 
 async def _confirm_rule(event: MessageEvent) -> bool:
-    """检查用户是否处于等待确认状态"""
     user_id = str(event.user_id)
     return await state_mgr.is_waiting_confirm(user_id)
 
@@ -155,17 +200,14 @@ async def handle_confirm(bot: Bot, event: MessageEvent):
     payload = state.payload
     parsed = payload.get("parsed", {})
     img_path = payload.get("img_path", "")
-    group_id = payload.get("group_id")
 
     if text in ("N", "否", "NO", "取消"):
         await state_mgr.clear(user_id)
         await confirm_handler.finish("已取消录入。")
 
-    # 确认保存
     await confirm_handler.send("⏳ 正在保存装备...")
 
     try:
-        # 查找模板
         mfr_str = parsed.get("manufacturer", "")
         type_str = parsed.get("type", "")
         slot_str = parsed.get("slot", "")
@@ -181,24 +223,35 @@ async def handle_confirm(bot: Bot, event: MessageEvent):
                 f"制造商={mfr_str}, 类型={type_str}, 部位={slot_str}"
             )
 
-        # 查找模板
-        async with TemplateRepository() as tmpl_repo:
-            template = await tmpl_repo.get_by_key(mfr, etype, eslot)
-            if template is None:
-                await state_mgr.clear(user_id)
-                await confirm_handler.finish(
-                    f"❌ 未找到装备模板: {mfr.value} / {etype.value} / {eslot.value}"
-                )
+        tmpl_repo = TemplateRepository(_get_db())
+        template = await tmpl_repo.get_by_key(mfr, etype, eslot)
+        if template is None:
+            await state_mgr.clear(user_id)
+            await confirm_handler.finish(
+                f"❌ 未找到装备模板: {mfr.value} / {etype.value} / {eslot.value}"
+            )
 
-        # 创建装备
-        equipment = await equip_service.create_equipment(
+        # 构建 DTO
+        affix_dtos = [
+            CreateAffixDTO(
+                name=a.get("name", ""),
+                value=a.get("value", 0),
+                quality=a.get("quality", "blue"),
+                raw_name=a.get("raw_name"),
+            )
+            for a in parsed.get("affixes", [])
+        ]
+        dto = CreateEquipmentDTO(
             owner_id=user_id,
             template_id=template.id,  # type: ignore
             character_id=None,
             level=parsed.get("level", 0),
-            affixes_data=parsed.get("affixes", []),
+            affixes=affix_dtos,
             screenshot_path=img_path,
         )
+
+        equip_svc = _make_equip_service()
+        equipment = await equip_svc.create_equipment(dto)
 
         await state_mgr.clear(user_id)
         await confirm_handler.finish(
@@ -217,7 +270,7 @@ async def handle_confirm(bot: Bot, event: MessageEvent):
 
 
 # ============================================================
-# /我的装备 — 查询用户装备
+# /我的装备
 # ============================================================
 
 my_equip_cmd = on_command("我的装备", aliases={"查看装备", "装备列表"}, priority=5)
@@ -229,11 +282,10 @@ async def handle_my_equipment(bot: Bot, event: MessageEvent, args: Message = Com
     await _ensure_user_registered(user_id, event.sender.nickname or "")
 
     page_str = args.extract_plain_text().strip()
-    page = 1
-    if page_str.isdigit():
-        page = max(1, int(page_str))
+    page = max(1, int(page_str)) if page_str.isdigit() else 1
 
-    equipments, total = await equip_service.get_user_equipments(
+    equip_svc = _make_equip_service()
+    equipments, total = await equip_svc.get_user_equipments(
         owner_id=user_id, page=page, page_size=5,
     )
 
@@ -261,7 +313,7 @@ async def handle_my_equipment(bot: Bot, event: MessageEvent, args: Message = Com
 
 
 # ============================================================
-# /删除装备 — 删除装备
+# /删除装备
 # ============================================================
 
 delete_cmd = on_command("删除装备", aliases={"装备删除", "删除词条"}, priority=5)
@@ -276,9 +328,10 @@ async def handle_delete(bot: Bot, event: MessageEvent, args: Message = CommandAr
         await delete_cmd.finish("请指定要删除的装备 ID，例如：/删除装备 42")
 
     equipment_id = int(raw)
+    equip_svc = _make_equip_service()
 
     try:
-        success = await equip_service.delete_equipment(equipment_id, user_id)
+        success = await equip_svc.delete_equipment(equipment_id, user_id)
         if success:
             await delete_cmd.finish(f"✅ 已删除装备 #{equipment_id}")
         else:
@@ -306,9 +359,10 @@ async def handle_lock(bot: Bot, event: MessageEvent, args: Message = CommandArg(
     equipment_id = int(raw)
 
     try:
-        eq = await equip_service.get_equipment_detail(equipment_id)
+        equip_svc = _make_equip_service()
+        eq = await equip_svc.get_equipment_detail(equipment_id)
         if eq and not eq.is_locked:
-            await equip_service.toggle_lock(equipment_id, user_id)
+            await equip_svc.toggle_lock(equipment_id, user_id)
             await lock_cmd.finish(f"🔒 已锁定装备 #{equipment_id}")
         elif eq:
             await lock_cmd.finish(f"装备 #{equipment_id} 已经处于锁定状态")
@@ -327,9 +381,10 @@ async def handle_unlock(bot: Bot, event: MessageEvent, args: Message = CommandAr
     equipment_id = int(raw)
 
     try:
-        eq = await equip_service.get_equipment_detail(equipment_id)
+        equip_svc = _make_equip_service()
+        eq = await equip_svc.get_equipment_detail(equipment_id)
         if eq and eq.is_locked:
-            await equip_service.toggle_lock(equipment_id, user_id)
+            await equip_svc.toggle_lock(equipment_id, user_id)
             await unlock_cmd.finish(f"🔓 已解锁装备 #{equipment_id}")
         elif eq:
             await unlock_cmd.finish(f"装备 #{equipment_id} 未锁定")
@@ -340,7 +395,7 @@ async def handle_unlock(bot: Bot, event: MessageEvent, args: Message = CommandAr
 
 
 # ============================================================
-# /帮助 — 命令列表
+# /帮助
 # ============================================================
 
 help_cmd = on_command("帮助", aliases={"help", "菜单"}, priority=5)

@@ -14,17 +14,15 @@ from src.utils.json_utils import safe_json_dumps, safe_json_loads
 
 
 class UserRepository(BaseRepository):
-    """用户数据访问层"""
+    """用户数据访问层。
+
+    使用方式:
+        repo = UserRepository(db)
+        user = await repo.get_by_id("123456789")
+    """
 
     async def upsert(self, user: User) -> User:
-        """创建或更新用户。
-
-        Args:
-            user: 用户模型
-
-        Returns:
-            更新后的 User（含时间戳）
-        """
+        """创建或更新用户。"""
         now = utc_now()
         prefs_json = safe_json_dumps(user.preferences.model_dump())
 
@@ -46,16 +44,10 @@ class UserRepository(BaseRepository):
         return user
 
     async def get_by_id(self, qq_id: str) -> Optional[User]:
-        """根据 QQ 号查询用户。
-
-        Args:
-            qq_id: QQ 号
-
-        Returns:
-            User 或 None
-        """
+        """根据 QQ 号查询用户。"""
         cursor = await self.db.execute(
-            "SELECT qq_id, nickname, preferences, created_at, updated_at FROM users WHERE qq_id = ?",
+            "SELECT qq_id, nickname, preferences, created_at, updated_at "
+            "FROM users WHERE qq_id = ?",
             (qq_id,),
         )
         row = await cursor.fetchone()
@@ -64,14 +56,7 @@ class UserRepository(BaseRepository):
         return self._row_to_user(row)
 
     async def delete(self, qq_id: str) -> bool:
-        """删除用户（级联删除其装备）。
-
-        Args:
-            qq_id: QQ 号
-
-        Returns:
-            是否删除成功
-        """
+        """删除用户（级联删除其装备）。"""
         cursor = await self.db.execute(
             "DELETE FROM users WHERE qq_id = ?", (qq_id,)
         )
@@ -79,20 +64,11 @@ class UserRepository(BaseRepository):
         return cursor.rowcount > 0
 
     async def exists(self, qq_id: str) -> bool:
-        """检查用户是否存在。
-
-        Args:
-            qq_id: QQ 号
-
-        Returns:
-            是否存在
-        """
+        """检查用户是否存在。"""
         cursor = await self.db.execute(
             "SELECT 1 FROM users WHERE qq_id = ? LIMIT 1", (qq_id,)
         )
         return await cursor.fetchone() is not None
-
-    # ---- 内部方法 ----
 
     def _row_to_user(self, row: aiosqlite.Row) -> User:
         """将数据库行转换为 User 模型"""

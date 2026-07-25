@@ -19,10 +19,15 @@ logger = logging.getLogger(__name__)
 
 
 class OCRService:
-    """OCR 识别服务"""
+    """OCR 识别服务。
 
-    def __init__(self):
-        self.record_repo = OCRRecordRepository()
+    使用方式:
+        service = OCRService(record_repo=OCRRecordRepository(db))
+        result, record = await service.recognize("image.png", user_id="123")
+    """
+
+    def __init__(self, record_repo: OCRRecordRepository):
+        self.record_repo = record_repo
 
     async def recognize(
         self,
@@ -30,25 +35,14 @@ class OCRService:
         user_id: Optional[str] = None,
         engine_name: Optional[str] = None,
     ) -> tuple[OCRResult, OCRRecord]:
-        """识别图片并保存记录。
-
-        Args:
-            image_path: 图片路径
-            user_id: 用户 QQ 号（可选）
-            engine_name: 引擎名称（可选）
-
-        Returns:
-            (OCRResult, OCRRecord)
-        """
+        """识别图片并保存记录。"""
         start_time = time.time()
 
-        # 获取引擎并识别
         engine = await create_ocr_engine(engine_name)
         result = await engine.recognize(image_path)
 
         elapsed_ms = int((time.time() - start_time) * 1000)
 
-        # 保存 OCR 记录
         record = OCRRecord(
             user_id=user_id or "",
             image_path=image_path,
@@ -61,8 +55,7 @@ class OCRService:
             processing_time_ms=elapsed_ms,
         )
 
-        async with self.record_repo as repo:
-            record = await repo.insert(record)
+        record = await self.record_repo.insert(record)
 
         logger.info(
             f"OCR 识别完成: engine={result.engine}, "
